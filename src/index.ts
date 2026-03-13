@@ -35,3 +35,6 @@ export const listSkills = () => registry.listSkills();
 
 /** Search skills by keyword: searchSkills('yield') */
 export const searchSkills = (query: string) => registry.searchSkills(query);
+
+// Bankr execution layer — Think + Act
+export { BankrExecutor, optimizeAndExecute, smartSwap, monitorAndProtect } from './bankr/executor';

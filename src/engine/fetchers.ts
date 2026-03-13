@@ -339,10 +339,8 @@ export const morphoFetcher = {
   // Get borrow APY for a specific token (loan asset)
   async getBorrowRates(token: string) {
     const markets = await this.getMarkets(token);
-    // Filter to markets where this token is the loan asset
     const borrowMarkets = markets.filter((m: any) => m.loanAsset?.toUpperCase() === token.toUpperCase());
     if (borrowMarkets.length === 0) return null;
-    // Return weighted average or best rate
     const sorted = borrowMarkets.sort((a: any, b: any) => a.borrowApy - b.borrowApy);
     return {
       bestBorrowApy: sorted[0].borrowApy,
@@ -351,8 +349,38 @@ export const morphoFetcher = {
     };
   },
 
-  // Get supply APY for a specific token
+  // Get supply APY for a specific token — checks both markets AND MetaMorpho vaults
   async getSupplyRates(token: string) {
+    // First try vaults — these have real aggregated APYs
+    const vaults = await this.getVaults(token);
+    if (vaults.length > 0) {
+      const bestVault = vaults.reduce((a: any, b: any) =>
+        ((b.state?.netApy || b.state?.apy || 0) > (a.state?.netApy || a.state?.apy || 0)) ? b : a, vaults[0]);
+      const vaultApy = (bestVault.state?.netApy || bestVault.state?.apy || 0) * 100;
+      return {
+        bestSupplyApy: vaultApy,
+        bestMarket: {
+          id: bestVault.address,
+          loanAsset: bestVault.asset?.symbol || token,
+          collateralAsset: 'multi',
+          supplyApy: vaultApy,
+          supplyUsd: bestVault.state?.totalAssetsUsd || 0,
+          isVault: true,
+          vaultName: bestVault.name,
+        },
+        allMarkets: vaults.map((v: any) => ({
+          id: v.address,
+          loanAsset: v.asset?.symbol || token,
+          collateralAsset: 'multi',
+          supplyApy: (v.state?.netApy || v.state?.apy || 0) * 100,
+          supplyUsd: v.state?.totalAssetsUsd || 0,
+          isVault: true,
+          vaultName: v.name,
+        })),
+      };
+    }
+
+    // Fallback: check raw markets
     const markets = await this.getMarkets(token);
     const supplyMarkets = markets.filter((m: any) => m.loanAsset?.toUpperCase() === token.toUpperCase());
     if (supplyMarkets.length === 0) return null;
@@ -410,25 +438,53 @@ export const fluidFetcher = {
     }
   },
 
-  // Get token-level supply and borrow rates from Liquidity Resolver
+  // Get token-level supply and borrow rates
+  // Primary: DefiLlama yields API for Fluid pools on Base
+  // Fallback: derive from fToken data
   async getTokenRates(token: string) {
     try {
-      const addr = resolveAddress(token);
-      const data = await callContract(
-        PROTOCOL_ADDRESSES.fluid.liquidityResolver,
-        FLUID_LIQUIDITY_RESOLVER_ABI,
-        'getOverallTokenData',
-        [addr]
+      // Use DefiLlama yields API to get Fluid rates on Base
+      const res = await axios.get('https://yields.llama.fi/pools', { timeout: 10000 });
+      const pools = res.data?.data || [];
+
+      // Find Fluid pools on Base for this token
+      const fluidPools = pools.filter((p: any) =>
+        p.project === 'fluid' &&
+        p.chain === 'Base' &&
+        p.symbol?.toUpperCase().includes(token.toUpperCase())
       );
-      return {
-        supplyRate: Number(data.supplyRate) / 1e4, // basis points to percent
-        borrowRate: Number(data.borrowRate) / 1e4,
-        utilization: Number(data.lastStoredUtilization) / 1e4,
-        totalSupply: Number(data.totalSupply),
-        totalBorrow: Number(data.totalBorrow),
-        supplyExchangePrice: Number(data.supplyExchangePrice),
-        borrowExchangePrice: Number(data.borrowExchangePrice),
-      };
+
+      if (fluidPools.length > 0) {
+        // Pick the pool with highest TVL
+        const best = fluidPools.sort((a: any, b: any) => (b.tvlUsd || 0) - (a.tvlUsd || 0))[0];
+        return {
+          supplyRate: best.apyBase || best.apy || 0,
+          borrowRate: best.apyBaseBorrow || 0,
+          utilization: 0,
+          totalSupply: best.tvlUsd || 0,
+          totalBorrow: 0,
+          supplyExchangePrice: 0,
+          borrowExchangePrice: 0,
+        };
+      }
+
+      // Fallback: derive from fToken data
+      const fTokens = await this.getLendingData();
+      const match = fTokens.find((f: any) => f.symbol?.toUpperCase().includes(token.toUpperCase()));
+      if (match && match.totalSupply > 0) {
+        const supplyRate = ((match.totalAssets - match.totalSupply) / match.totalSupply) * 100;
+        return {
+          supplyRate: Math.abs(supplyRate),
+          borrowRate: 0,
+          utilization: 0,
+          totalSupply: match.totalAssets,
+          totalBorrow: 0,
+          supplyExchangePrice: match.convertToAssets,
+          borrowExchangePrice: 0,
+        };
+      }
+
+      return null;
     } catch (err) {
       console.error('[fluid] getTokenRates failed:', err);
       return null;
