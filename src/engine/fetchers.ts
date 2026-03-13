@@ -263,7 +263,7 @@ export const aerodromeFetcher = {
 // MORPHO FETCHER (GraphQL API — no subgraph needed!)
 // =============================================
 
-const MORPHO_API = 'https://blue-api.morpho.org/graphql';
+const MORPHO_API = 'https://api.morpho.org/graphql';
 
 export const morphoFetcher = {
   // Get all markets on Base with borrow/supply APYs
@@ -316,16 +316,18 @@ export const morphoFetcher = {
   async getVaults(loanAsset?: string) {
     try {
       const query = `{
-        vaults(first: 100, orderBy: TotalAssetsUsd, orderDirection: Desc, where: { chainId_in: [8453] }) {
+        vaultV2s(first: 100, where: { chainId_in: [8453] }) {
           items {
-            address name
-            asset { symbol address }
-            state { totalAssetsUsd netApy apy fee curator { address } }
+            address name symbol
+            asset { symbol address decimals }
+            totalAssetsUsd
+            avgApy avgNetApy
+            performanceFee
           }
         }
       }`;
       const res = await axios.post(MORPHO_API, { query }, { timeout: 10000 });
-      let vaults = res.data?.data?.vaults?.items || [];
+      let vaults = res.data?.data?.vaultV2s?.items || [];
       if (loanAsset) {
         vaults = vaults.filter((v: any) => v.asset?.symbol?.toUpperCase() === loanAsset.toUpperCase());
       }
@@ -355,8 +357,8 @@ export const morphoFetcher = {
     const vaults = await this.getVaults(token);
     if (vaults.length > 0) {
       const bestVault = vaults.reduce((a: any, b: any) =>
-        ((b.state?.netApy || b.state?.apy || 0) > (a.state?.netApy || a.state?.apy || 0)) ? b : a, vaults[0]);
-      const vaultApy = (bestVault.state?.netApy || bestVault.state?.apy || 0) * 100;
+        ((b.avgNetApy || b.avgApy || 0) > (a.avgNetApy || a.avgApy || 0)) ? b : a, vaults[0]);
+      const vaultApy = (bestVault.avgNetApy || bestVault.avgApy || 0) * 100;
       return {
         bestSupplyApy: vaultApy,
         bestMarket: {
@@ -364,7 +366,7 @@ export const morphoFetcher = {
           loanAsset: bestVault.asset?.symbol || token,
           collateralAsset: 'multi',
           supplyApy: vaultApy,
-          supplyUsd: bestVault.state?.totalAssetsUsd || 0,
+          supplyUsd: bestVault.totalAssetsUsd || 0,
           isVault: true,
           vaultName: bestVault.name,
         },
@@ -372,8 +374,8 @@ export const morphoFetcher = {
           id: v.address,
           loanAsset: v.asset?.symbol || token,
           collateralAsset: 'multi',
-          supplyApy: (v.state?.netApy || v.state?.apy || 0) * 100,
-          supplyUsd: v.state?.totalAssetsUsd || 0,
+          supplyApy: (v.avgNetApy || v.avgApy || 0) * 100,
+          supplyUsd: v.totalAssetsUsd || 0,
           isVault: true,
           vaultName: v.name,
         })),
